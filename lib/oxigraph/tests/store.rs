@@ -366,6 +366,102 @@ fn test_snapshot_isolation_iterator_on_disk() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn test_optimize_keeps_live_quads_and_open_iterators() -> Result<(), Box<dyn Error>> {
+    let s = NamedNodeRef::new("http://example.com/s")?;
+    let p = NamedNodeRef::new("http://example.com/p")?;
+    let g = NamedNodeRef::new("http://example.com/g")?;
+    let value = |i: usize| Literal::new_simple_literal(format!("value number {i} of the stream"));
+    let store = Store::new()?;
+    for i in 0..10 {
+        if i > 0 {
+            store.remove(QuadRef::new(s, p, &value(i - 1), g))?;
+        }
+        store.insert(QuadRef::new(s, p, &value(i), g))?;
+    }
+    let before = store.quads_for_pattern(Some(s.into()), None, None, None);
+    store.optimize()?;
+    let current = QuadRef::new(s, p, &value(9), g).into_owned();
+    assert_eq!(
+        before.collect::<Result<Vec<_>, _>>()?,
+        vec![current.clone()]
+    );
+    assert_eq!(
+        store.iter().collect::<Result<Vec<_>, _>>()?,
+        vec![current.clone()]
+    );
+    assert!(store.contains_named_graph(g)?);
+    store.validate()?;
+
+    store.remove(&current)?;
+    store.insert(QuadRef::new(s, p, &value(10), g))?;
+    assert_eq!(store.len()?, 1);
+    store.validate()?;
+    Ok(())
+}
+
+/// Prints scan and compaction times under a value-replacing churn.
+/// Run with `cargo test -p oxigraph --test store optimize_churn_measurement -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn optimize_churn_measurement() -> Result<(), Box<dyn Error>> {
+    use std::time::Instant;
+    const SUBJECTS: usize = 1_000;
+    const ROUNDS: usize = 200;
+    let p = NamedNodeRef::new("http://example.com/position")?;
+    let subject = |i: usize| NamedNode::new_unchecked(format!("http://example.com/track/{i}"));
+    let value = |round: usize, i: usize| {
+        Literal::new_simple_literal(format!("POINT({round}.{i} {i}.{round})"))
+    };
+    let store = Store::new()?;
+    for round in 0..ROUNDS {
+        let mut transaction = store.start_transaction()?;
+        for i in 0..SUBJECTS {
+            let s = subject(i);
+            if round > 0 {
+                transaction.remove(QuadRef::new(
+                    &s,
+                    p,
+                    &value(round - 1, i),
+                    GraphNameRef::DefaultGraph,
+                ));
+            }
+            transaction.insert(QuadRef::new(
+                &s,
+                p,
+                &value(round, i),
+                GraphNameRef::DefaultGraph,
+            ));
+        }
+        transaction.commit()?;
+    }
+    let probe = subject(SUBJECTS / 2);
+    let scan = |store: &Store| -> Result<(usize, std::time::Duration), Box<dyn Error>> {
+        let start = Instant::now();
+        let mut found = 0;
+        for _ in 0..100 {
+            found = store
+                .quads_for_pattern(Some(probe.as_ref().into()), None, None, None)
+                .count();
+        }
+        Ok((found, start.elapsed() / 100))
+    };
+    let (found_before, scan_before) = scan(&store)?;
+    let start = Instant::now();
+    store.optimize()?;
+    let compaction = start.elapsed();
+    let (found_after, scan_after) = scan(&store)?;
+    println!(
+        "{SUBJECTS} subjects x {ROUNDS} rounds: live {}, scan before {scan_before:?}, \
+         optimize {compaction:?}, scan after {scan_after:?}",
+        store.len()?
+    );
+    assert_eq!(found_before, 1);
+    assert_eq!(found_after, 1);
+    assert_eq!(store.len()?, SUBJECTS);
+    Ok(())
+}
+
+#[test]
 fn test_bulk_load_on_existing_delete_overrides_the_delete() -> Result<(), Box<dyn Error>> {
     let quad = QuadRef::new(
         NamedNodeRef::new_unchecked("http://example.com/s"),

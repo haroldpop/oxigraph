@@ -152,12 +152,11 @@ impl Storage {
         }
     }
 
-    #[cfg(all(not(target_family = "wasm"), feature = "rocksdb"))]
     pub fn compact(&self) -> Result<(), StorageError> {
         match &self.kind {
             #[cfg(all(not(target_family = "wasm"), feature = "rocksdb"))]
             StorageKind::RocksDb(storage) => storage.compact(),
-            StorageKind::Memory(_) => Ok(()),
+            StorageKind::Memory(storage) => storage.compact(),
         }
     }
 

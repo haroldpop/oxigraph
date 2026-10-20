@@ -1030,8 +1030,11 @@ impl Store {
     ///
     /// Useful to call after a batch upload or another similar operation.
     ///
+    /// On an in-memory store, removed quads are kept until this is called: it rebuilds the store
+    /// from the quads it currently contains, freeing removed quads and the strings only they used.
+    /// Writes wait while it runs; reads, including iterators opened before, are not affected.
+    ///
     /// <div class="warning">Can take hours on huge databases.</div>
-    #[cfg(all(not(target_family = "wasm"), feature = "rocksdb"))]
     pub fn optimize(&self) -> Result<(), StorageError> {
         self.storage.compact()
     }
